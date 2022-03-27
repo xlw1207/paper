@@ -16,7 +16,7 @@ def topdiff(adata, groupby='Cluster', n_genes=10, pval_adj_thresh=0.01):
         
     return(topnames)
  
- def matrix_to_df(adata, layer='X', gene_name_key=None):
+def matrix_to_df(adata, layer='X', gene_name_key=None):
     import os
     import pandas as pd
     import scanpy as sc
