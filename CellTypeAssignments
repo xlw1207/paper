@@ -1,0 +1,143 @@
+def topdiff(adata, groupby='Cluster', n_genes=10, pval_adj_thresh=0.01):
+    import scanpy as sc
+    import pandas as pd
+    topnames = []
+    
+    # Re-do rank_genes_groups if the correct data isn't current stored in .uns
+    current_diffex_key = adata.uns['rank_genes_groups']['params']['groupby']
+    if current_diffex_key != groupby:
+        sc.tl.rank_genes_groups(adata, groupby=groupby)
+        
+    for cluster in adata.obs[groupby].unique():
+        df = sc.get.rank_genes_groups_df(adata, group=cluster)
+        df = df[df['pvals_adj'] < pval_adj_thresh]
+        df = df.nlargest(columns='logfoldchanges', n=n_genes)
+        topnames += df['names'].tolist()
+        
+    return(topnames)
+ 
+ def matrix_to_df(adata, layer='X', gene_name_key=None):
+    import os
+    import pandas as pd
+    import scanpy as sc
+    from scipy.sparse import issparse
+    import numpy as np
+    
+    valid_layers = ['X','raw'] + list(adata.layers.keys())
+    assert layer in valid_layers, 'layer must be either: X, raw, or a layer in adata.layers'
+    
+    if layer == 'X':
+        print('Using scaled data in adata.X')
+        if issparse(adata.X):
+            counts = pd.DataFrame(adata.X.toarray())
+        else: 
+            counts = pd.DataFrame(adata.X)
+        
+    elif layer == 'raw':
+        print('Using raw lognorm data in adata.raw')
+        if issparse(adata.raw.X):
+            counts = pd.DataFrame(adata.raw.X.toarray())
+        else: 
+            counts = pd.DataFrame(adata.X)
+            
+    elif layer == 'counts':
+        if issparse(adata.layers[layer]):
+            counts = pd.DataFrame(np.floor(adata.layers[layer].toarray()).astype('float64'))
+        else: 
+            counts = pd.DataFrame(np.floor(adata.layers[layer]).astype('float64'))
+    
+    elif layer in adata.layers:
+        if issparse(adata.layers[layer]):
+            counts = pd.DataFrame(adata.layers[layer].toarray())
+        else: 
+            counts = pd.DataFrame(adata.layers[layer])
+    
+    else:
+        print('Warning, layer',layer,'not found in adata.layers')
+    
+    if str(counts.__class__) == "<class 'pandas.core.frame.DataFrame'>":
+        if layer != 'raw':
+            if not gene_name_key:
+                counts.columns = adata.var_names
+            else:
+                counts.columns = np.array(adata.var[gene_name_key])
+            counts.index = adata.obs.index
+        else:
+            if not gene_name_key:
+            	counts.columns = adata.raw.var_names
+            	shared_genes = adata.var_names.intersection(adata.raw.var_names)
+            else:
+                counts.columns = adata.raw.var[gene_name_key]
+                shared_genes = list(set(adata.var[gene_name_key]).intersection(set(adata.raw.var[gene_name_key])))
+            counts.index = adata.raw.obs_names
+        	#shared_genes = adata.var_names.intersection(adata.raw.var_names)
+        	#print('shared genes:',len(shared_genes))
+            shared_cells = adata.obs_names.intersection(adata.raw.obs_names)
+        	#print('shared cells:',len(shared_cells))
+            counts = counts.loc[shared_cells,shared_genes]
+ 
+    return counts
+    
+    
+# optimize n_features:
+import pickle
+from sklearn.model_selection import train_test_split
+from sklearn import svm
+n_features = 50
+
+reg.layers['lognorm'] = reg.raw.X
+
+results_total = pd.DataFrame(columns=['genes_per_group','accuracy','precision','recall'])
+results_total.loc[len(results_total)] = np.array([0,0,0,0])
+cell_type_key = 'Regev_Cluster'
+
+empirical_markers = topdiff(reg, groupby=cell_type_key, n_genes=n_features, pval_adj_thresh=1e-6)
+empirical_markers = list(set([name for name in empirical_markers if name in adata.var_names]))
+empirical_cell_types = reg.obs[cell_type_key]
+df = pd.DataFrame(reg[:,empirical_markers].layers['lognorm'].todense())
+df.columns = empirical_markers
+
+# Split dataset into training set and test set
+X_train, X_test, y_train, y_test = train_test_split(df, empirical_cell_types, test_size=0.3,random_state=109) # 70% training and 30% test
+
+#Create a svm Classifier
+#clf = svm.SVC(kernel='linear') # Linear Kernel
+#clf = svm.SVC(kernel='poly') # Polynomial Kernel
+clf = svm.SVC(kernel='rbf') # Gaussian Kernel
+
+#Train the model using the training sets
+print('Training model using n_features = ',n_features,'per cell type')
+clf.fit(X_train, y_train)
+
+#Predict the response for test dataset
+y_pred = clf.predict(X_test)
+
+#Import scikit-learn metrics module for accuracy calculation
+from sklearn import metrics
+
+# Model Accuracy: how often is the classifier correct?
+acc = metrics.accuracy_score(y_test, y_pred)
+
+# Model Precision: what percentage of positive tuples are labeled as such?
+prec = metrics.precision_score(y_test, y_pred, average='weighted')
+
+# Model Recall: what percentage of positive tuples are labelled as such?
+rec = metrics.recall_score(y_test, y_pred, average='weighted')
+
+results_entry = np.array([n_features,acc,prec,rec])
+results_total.loc[len(results_total)] = results_entry
+
+
+xw_test_data = matrix_to_df(tmp[:,empirical_markers], layer='raw')
+SVM_prediction = clf.predict(xw_test_data)
+SVM_prediction = pd.DataFrame(SVM_prediction, index=xw_test_data.index, columns = ['SVM_pred_gaussian'])
+
+ct = pd.DataFrame(adata.obs.loc[:,'Cell_Type'])
+new_cats = [name for name in SVM_prediction['SVM_pred_gaussian'].unique() if name not in ct.Cell_Type.cat.categories]
+
+ct.Cell_Type = ct.Cell_Type.cat.add_categories(new_cats)
+ct = ct.mask(mymask, SVM_prediction['SVM_pred_gaussian'], axis=0)
+
+adata.obs['SVM_predict'] = ct.Cell_Type
+sc.pl.umap(adata, color='SVM_predict')
+
